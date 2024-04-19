@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
-from tcp import Servidor
+from grader.tcp import Servidor
 import re
 
 
@@ -9,17 +9,103 @@ def validar_nome(nome):
 
 
 def sair(conexao):
+    global connection_to_apelido
     print(conexao, 'conexão fechada')
+    # passo 8 
+    connections_visited = set() 
+    canals_in = [canal for canal, connections in canal_to_connections.items() if conexao in connections]
+    for canal in canals_in:
+        for connection in canal_to_connections[canal][:]:
+            if connection == conexao:
+                canal_to_connections[canal.lower()].remove(conexao)
+            elif connection not in connections_visited:
+                connection.enviar(b":" + connection_to_apelido[conexao] + b" QUIT :Connection closed\r\n" )
+                connections_visited.add(connection)
+    del connection_to_apelido[conexao]
     conexao.fechar()
 
-
+connection_to_apelido = {} #conexao : apelido 
+residuos = b''
+canal_to_connections = {} #canal : [conexao]
 def dados_recebidos(conexao, dados):
+    global residuos
+    global connection_to_apelido
+    global canal_to_connections
     if dados == b'':
         return sair(conexao)
-    print(conexao, dados)
+        
+    residuos += dados #passo 2
+    delimiter = b'\n'
+    if delimiter in residuos:
+        lines = [e+delimiter for e in residuos.split(delimiter)]
+        residuos = lines[-1].replace(b'\n', b'')
+        # processar cada linha 
+        for line in lines[:-1]:
+            line = line.replace(b'\r\n', b'')
+            line_splitted = line.split(b' ')
+
+            if line.startswith(b"PING"): #passo 1
+                conexao.enviar(b":server PONG server :" + line_splitted[1] + b"\r\n")
+
+            elif line.startswith(b"NICK"): #passo 3
+                apelido_atual = connection_to_apelido[conexao]
+                apelido_novo = line_splitted[1]
+                if validar_nome(apelido_novo.lower()): # passo 4 
+                    if apelido_novo.lower() in connection_to_apelido.values():
+                        conexao.enviar(b":server 433 " + apelido_atual + b" " + apelido_novo + b" :Nickname is already in use\r\n")
+                    elif apelido_atual == b'*':
+                        conexao.enviar(b":server 001 " + apelido_novo + b" :Welcome\r\n")
+                        conexao.enviar(b":server 422 " + apelido_novo + b" :MOTD File is missing\r\n")
+                        connection_to_apelido[conexao] = apelido_novo.lower()
+                    else: # trocar de nome
+                        conexao.enviar(b":" + apelido_atual + b" NICK " + apelido_novo + b"\r\n")
+                        connection_to_apelido[conexao] = apelido_novo.lower()
+                else: # nome nao eh valido 
+                    conexao.enviar(b":server 432 " + apelido_atual + b" " + apelido_novo + b" :Erroneous nickname\r\n")
+
+            elif line.startswith(b"PRIVMSG"): #passo 5 
+                receiver = line_splitted[1] # canal ou nick
+                msg = line_splitted[2] #msg vai possuir o :
+                if receiver.lower().startswith(b"#"): # se for canal
+                    for connection in canal_to_connections[receiver.lower()]:
+                        if connection != conexao: # para nao mandar a msg para si mesmo
+                            connection.enviar(b":" + connection_to_apelido[conexao] + b" PRIVMSG " + receiver + b" " + msg + b"\r\n")
+                else: # se for nick
+                    for their_connection, their_nick in connection_to_apelido.items():
+                        if their_nick == receiver.lower():
+                            their_connection.enviar(b":" + connection_to_apelido[conexao] + b" PRIVMSG " + receiver + b" " + msg + b"\r\n")
+
+            elif line.startswith(b"JOIN"): #passo 6
+                canal = line_splitted[1]
+                # conexao.enviar(b":" + connection_to_apelido[conexao] + b" JOIN :" + canal + b"\r\n") #this works on passo 6, mas on passo 9 is changed 
+                if canal.lower() in canal_to_connections:
+                    canal_to_connections[canal.lower()].append(conexao)
+                else:
+                    canal_to_connections[canal.lower()] = [conexao]    
+                #passo 9
+                users_on_canal = [] 
+                for connection in canal_to_connections[canal.lower()]:
+                    connection.enviar(b":" + connection_to_apelido[conexao] + b" JOIN :" + canal + b"\r\n") #had to change 
+                    users_on_canal.append(connection_to_apelido[connection])
+                conexao.enviar(b':server 353 %s = %s :%s\r\n' % (connection_to_apelido[conexao], canal, b' '.join(sorted(users_on_canal))))
+                conexao.enviar(b':server 366 %s %s :End of /NAMES list.\r\n' % (connection_to_apelido[conexao], canal))
+                    
+
+            elif line.startswith(b"PART"):
+                canal = line_splitted[1]
+                for connection in canal_to_connections[canal.lower()][:]: #esse [:] é para criar uma cópia da lista, pois eu irei modificar ela no loop
+                    connection.enviar(b":" + connection_to_apelido[conexao] + b" PART " + canal + b"\r\n")
+                    if connection == conexao:
+                        canal_to_connections[canal.lower()].remove(conexao)
+
+    # else espera o proximo para concatenar 
 
 
-def conexao_aceita(conexao):
+    # print(conexao, dados)
+
+def conexao_aceita(conexao):#
+    global connection_to_apelido
+    connection_to_apelido[conexao] = b'*'
     print(conexao, 'nova conexão')
     conexao.registrar_recebedor(dados_recebidos)
 
